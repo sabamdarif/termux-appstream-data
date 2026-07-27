@@ -1,0 +1,84 @@
+diff --git a/src/contentsstore.cpp b/src/contentsstore.cpp
+index 2675b16..0b27009 100644
+--- a/src/contentsstore.cpp
++++ b/src/contentsstore.cpp
+@@ -49,8 +49,8 @@ ContentsStore::ContentsStore(const std::string &prefixPath)
+     if (!prefixPath.empty()) {
+         const auto prefix = Utils::normalizePath(prefixPath);
+         if (prefix != "/usr") {
+-            m_knownIconPaths.push_back(std::format("{}/icons/", prefix));
+-            m_knownIconPaths.push_back(std::format("{}/pixmaps/", prefix));
++            m_knownIconPaths.push_back(std::format("{}/share/icons/", prefix));
++            m_knownIconPaths.push_back(std::format("{}/share/pixmaps/", prefix));
+         }
+     }
+ }
+diff --git a/src/engine.cpp b/src/engine.cpp
+index 273682b..7440b9a 100644
+--- a/src/engine.cpp
++++ b/src/engine.cpp
+@@ -761,7 +761,11 @@ bool Engine::processSuiteSection(const Suite &suite, const std::string &section,
+         // Process new packages
+         auto pkgs = m_pkgIndex->packagesFor(suite.name, section, arch);
+         auto iconh = std::make_shared<IconHandler>(
+-            *m_cstore, m_dstore->mediaExportPoolDir(), getIconCandidatePackages(suite, section, arch), suite.iconTheme);
++            *m_cstore,
++            m_dstore->mediaExportPoolDir(),
++            getIconCandidatePackages(suite, section, arch),
++            suite.iconTheme,
++            m_backendPrefixNotUsr ? m_backendPathPrefix : "");
+         processPackages(pkgs, iconh, injMods);
+ 
+         // Read injected data and add it to the database as a fake package
+@@ -893,7 +897,8 @@ bool Engine::processFile(
+             *m_cstore,
+             m_dstore->mediaExportPoolDir(),
+             getIconCandidatePackages(suite, sectionName, arch),
+-            suite.iconTheme);
++            suite.iconTheme,
++            m_backendPrefixNotUsr ? m_backendPathPrefix : "");
+         processPackages(pkgs, std::move(iconh), nullptr);
+     }
+ 
+diff --git a/src/iconhandler.cpp b/src/iconhandler.cpp
+index 992c7ca..5192905 100644
+--- a/src/iconhandler.cpp
++++ b/src/iconhandler.cpp
+@@ -138,7 +138,7 @@ Theme::Theme(const std::string &name, std::shared_ptr<Package> pkg, const std::s
+     if (prefix.empty())
+         indexData = pkg->getFileData(std::format("/usr/share/icons/{}/index.theme", name));
+     else
+-        indexData = pkg->getFileData(std::format("{}/icons/{}/index.theme", prefix, name));
++        indexData = pkg->getFileData(std::format("{}/share/icons/{}/index.theme", prefix, name));
+     *this = Theme(name, indexData, prefix);
+ }
+ 
+@@ -303,8 +303,8 @@ IconHandler::IconHandler(
+     std::string extraPixmapPath;
+     std::string extraIconsPath;
+     if (!m_extraPrefix.empty()) {
+-        extraIconsPath = std::format("{}/icons/", m_extraPrefix);
+-        extraPixmapPath = std::format("{}/pixmaps/", m_extraPrefix);
++        extraIconsPath = std::format("{}/share/icons/", m_extraPrefix);
++        extraPixmapPath = std::format("{}/share/pixmaps/", m_extraPrefix);
+     }
+ 
+     // Process files in parallel, but synchronize theme and icon file access
+@@ -326,7 +326,7 @@ IconHandler::IconHandler(
+ 
+         // optimization: check if we actually have an interesting path before
+         // entering the slower loop below.
+-        if (!fname.starts_with("/usr/share/icons/") || (!m_extraPrefix.empty() && !fname.starts_with(extraIconsPath)))
++        if (!fname.starts_with("/usr/share/icons/") && (m_extraPrefix.empty() || !fname.starts_with(extraIconsPath)))
+             return;
+ 
+         auto pkg = getPackage(pkgid);
+@@ -370,7 +370,7 @@ IconHandler::IconHandler(
+                 indexData.resize(f.tellg());
+                 f.seekg(0, std::ios::beg);
+                 f.read(reinterpret_cast<char *>(indexData.data()), indexData.size());
+-                tmpThemes["hicolor"] = std::make_unique<Theme>("hicolor", indexData);
++                tmpThemes["hicolor"] = std::make_unique<Theme>("hicolor", indexData, m_extraPrefix);
+             }
+         }
+     }

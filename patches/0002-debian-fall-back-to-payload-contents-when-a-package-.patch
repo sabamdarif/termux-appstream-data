@@ -1,0 +1,18 @@
+diff --git a/src/backends/debian/debpkg.cpp b/src/backends/debian/debpkg.cpp
+index a2c6698..f69106b 100644
+--- a/src/backends/debian/debpkg.cpp
++++ b/src/backends/debian/debpkg.cpp
+@@ -285,7 +285,12 @@ const std::vector<std::string> &DebPackage::contents()
+     try {
+         md5sumsData = ca.readData("./md5sums");
+     } catch (const std::exception &e) {
+-        logWarning("Could not read md5sums file for package {}: {}", id(), e.what());
++        logDebug("Could not read md5sums file for package {}: {}", id(), e.what());
++
++        std::lock_guard<std::mutex> lock(m_mutex);
++        auto &pa = openPayloadArchive();
++        m_contentsL = pa.readContents();
++        m_contentsRead = true;
+         return m_contentsL;
+     }
+ 

@@ -1,0 +1,230 @@
+name: Generate AppStream metadata
+
+on:
+  workflow_dispatch:
+    inputs:
+      architectures:
+        description: "Space-separated architectures to generate"
+        default: "aarch64 arm i686 x86_64"
+  schedule:
+    - cron: "23 3 * * 0"
+
+env:
+  ASGEN_REPO: https://github.com/ximion/appstream-generator.git
+  ASGEN_COMMIT: 58e216f1ae75c64c5b4df8d67558a6053fac3297
+  APPSTREAM_VERSION: 1.1.5
+  ARCHITECTURES: ${{ inputs.architectures || 'aarch64 arm i686 x86_64' }}
+
+jobs:
+  generate:
+    runs-on: ubuntu-26.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repo: root
+            rsync_dir: termux-root
+            suite: root
+            section: stable
+
+          - repo: x11
+            rsync_dir: termux-x11
+            suite: x11
+            section: main
+
+          - repo: main
+            rsync_dir: termux-main
+            suite: stable
+            section: main
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free additional disk space
+        run: sudo -E ./scripts/free-space.sh
+        env:
+          CI: "true"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bash-completion \
+            catch2 \
+            cmake \
+            docbook-xsl \
+            docbook-xsl-ns \
+            g++-14 \
+            gcc-14 \
+            gettext \
+            git \
+            gperf \
+            itstool \
+            libcairo2-dev \
+            libarchive-dev \
+            libblake3-dev \
+            libcurl4-openssl-dev \
+            libfontconfig1-dev \
+            libfreetype-dev \
+            libfyaml-dev \
+            libgdk-pixbuf-2.0-dev \
+            libgirepository1.0-dev \
+            libglib2.0-dev \
+            libicu-dev \
+            liblmdb-dev \
+            libpango1.0-dev \
+            librsvg2-dev \
+            libtbb-dev \
+            libunwind-dev \
+            libwayland-dev \
+            libxml2-dev \
+            libxmlb-dev \
+            libzstd-dev \
+            meson \
+            ninja-build \
+            pkg-config \
+            rsync \
+            xsltproc
+
+      - name: Build and install AppStream ${{ env.APPSTREAM_VERSION }}
+        run: |
+          curl -sL "https://github.com/ximion/appstream/archive/refs/tags/v${APPSTREAM_VERSION}.tar.gz" | tar xz
+          cd "appstream-${APPSTREAM_VERSION}"
+
+          meson setup build \
+            --prefix=/usr \
+            -Dcompose=true \
+            -Dstemming=false \
+            -Dsystemd=false \
+            -Dvapi=false \
+            -Dgir=false \
+            -Dqt=false \
+            -Dapidocs=false \
+            -Ddocs=false
+
+          ninja -C build
+          sudo ninja -C build install
+          sudo ldconfig
+
+      - name: Build patched appstream-generator
+        run: |
+          git clone "$ASGEN_REPO" asgen
+          cd asgen
+          git checkout "$ASGEN_COMMIT"
+
+          for p in ../patches/*.patch; do
+            echo "Applying $p"
+            patch -p1 --fuzz=0 < "$p"
+          done
+
+          meson setup build -Ddownload-js=false
+          ninja -C build
+
+      - name: Restore mirror and generator cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            mirror
+            work/${{ matrix.repo }}/db
+            work/${{ matrix.repo }}/cache
+          key: asgen-${{ matrix.repo }}-${{ github.run_id }}
+          restore-keys: |
+            asgen-${{ matrix.repo }}-
+
+      - name: Mirror ${{ matrix.rsync_dir }}
+        run: |
+          mkdir -p mirror
+
+          excludes=""
+          for a in aarch64 arm i686 x86_64; do
+            case " $ARCHITECTURES " in
+              *" $a "*) ;;
+              *) excludes="$excludes --exclude=*_${a}.deb" ;;
+            esac
+          done
+
+          rsync -a --delete --delete-excluded $excludes \
+            "rsync://packages.termux.dev/termux/apt/${{ matrix.rsync_dir }}" \
+            mirror/
+
+          du -sh "mirror/${{ matrix.rsync_dir }}"
+
+      - name: Generate metadata
+        run: |
+          mkdir -p "work/${{ matrix.repo }}"
+
+          arch_json=$(printf '"%s", ' $ARCHITECTURES)
+          arch_json=${arch_json%, }
+
+          cat > "work/${{ matrix.repo }}/asgen-config.json" <<EOF
+          {
+            "ProjectName": "Termux",
+            "ArchiveRoot": "$GITHUB_WORKSPACE/mirror/${{ matrix.rsync_dir }}",
+            "Backend": "debian",
+            "DataPrefix": "/data/data/com.termux/files/usr",
+            "MetadataType": "XML",
+            "Features": {
+              "validateMetainfo": true,
+              "createScreenshotsStore": false
+            },
+            "Suites": {
+              "${{ matrix.suite }}": {
+                "sections": ["${{ matrix.section }}"],
+                "architectures": [$arch_json]
+              }
+            }
+          }
+          EOF
+
+          cd "work/${{ matrix.repo }}"
+          "$GITHUB_WORKSPACE/asgen/build/src/appstream-generator" process "${{ matrix.suite }}"
+
+      - name: Show results
+        run: |
+          find "work/${{ matrix.repo }}/export" -type f | head -50
+
+          for f in \
+            work/${{ matrix.repo }}/export/data/*/*/Components-*.yml.gz \
+            work/${{ matrix.repo }}/export/data/*/*/Components-*.xml.gz; do
+            [ -f "$f" ] && echo "== $f ==" && zcat "$f" | head -40
+          done || true
+
+      - name: Upload metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: appstream-${{ matrix.repo }}
+          path: |
+            work/${{ matrix.repo }}/export/data
+            work/${{ matrix.repo }}/export/hints
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-latest
+    needs: generate
+    permissions:
+      contents: write
+    steps:
+      - name: Download metadata artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Pack metadata
+        run: |
+          for dir in artifacts/appstream-*; do
+            tar -C "$dir" -czf "$(basename "$dir").tar.gz" .
+          done
+          ls -lh *.tar.gz
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$(date -u +%Y.%m.%d)"
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "AppStream metadata $tag" \
+            --notes "Generated from the Termux apt repositories on $(date -u +%Y-%m-%dT%H:%M:%SZ) for: $ARCHITECTURES" \
+            || true
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber appstream-*.tar.gz
