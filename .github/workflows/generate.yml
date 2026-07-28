@@ -162,7 +162,6 @@ jobs:
             "ProjectName": "Termux",
             "ArchiveRoot": "$GITHUB_WORKSPACE/mirror/${{ matrix.rsync_dir }}",
             "Backend": "debian",
-            "DataPrefix": "/data/data/com.termux/files/usr",
             "MetadataType": "XML",
             "Features": {
               "validateMetainfo": true,
